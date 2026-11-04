@@ -1,6 +1,9 @@
 # Base and patched ROM images
 *.nes
 
+# List
+*.lst
+
 # Assembler outputs
 *.ips
 *.lst
