@@ -21,12 +21,16 @@ player_y               = $041C
 player_x               = $0438
 player_fraction_x      = $04C4
 player_fraction_y      = $04DB
+player_speed_x         = $04F2
+player_subspeed_x      = $0509
 player_speed_y         = $0520
+player_subspeed_y      = $0537
 current_character      = $054E
 player_state           = $0565
 player_phase           = $05C1
 player_stair_direction = $05EF
 player_stair_alignment = $0606
+player_stair_step      = $061D
 
 PAD_A                  = $80
 PAD_B                  = $40
@@ -43,7 +47,9 @@ STATE_ENTER_STAIRS     = $10
 STATE_STAIR_IDLE       = $12
 STATE_STAIR_MOVE       = $14
 STAIRS_PRG_BANK        = $8E ; MMC5 16 KiB pair $0E/$0F.
-ATTACH_TOLERANCE       = $05
+STAIR_CODE_PRG_BANK    = $98 ; MMC5 16 KiB pair $18/$19.
+ATTACH_TOLERANCE       = $01
+STAIR_POSITION_CHECKED = $80 ; Cached only while idle on a staircase.
 
 set_lower_prg_bank     = $E2E6
 start_stair_ascent     = $9B8E ; Sets animation, facing, X/Y speed and state $14.
@@ -59,7 +65,7 @@ stair_projected_y      = $0A
 stair_best_distance    = $0C ; Absolute horizontal distance to nearest endpoint.
 stair_best_correction  = $0E ; Signed screen-Y correction, within tolerance.
 stair_best_flags       = $0F
-stair_best_side        = $10 ; High byte of the selected signed X displacement.
+stair_bounds           = $10 ; Bits 0/1 mark lower/upper bounds, bit 7 an outside nearest endpoint.
 stair_endpoint_flags   = $11
 stair_distance         = $12 ; 16-bit absolute displacement.
 stair_correction       = $14
@@ -79,22 +85,55 @@ ENDCOMPARE
 SKIPREL -3
 JSR stair_controls_tick
 
-; Both code regions are padding in the unmodified US ROM.
+; All code regions are padding in the unmodified US ROM.
 ; COMPARE rejects occupied space when applying to another hack.
 FILLVALUE $FF
 COMPARE
-; Original implementation using the game's room endpoints and state handlers.
 
-; $C800 is the final byte of DPCM sound $75. Leave it intact.
-SEEKABS $03C820
-BASE $C810
+; This entry shares the player bank with the dispatch hook and stair handler.
+; $C000-$DFFF can contain either game code or DPCM data during boss fights.
+SEEKABS $03BFBB
+BASE $BFAB
 
 stair_controls_tick:
     PHP
     PHA
     TXA
     PHA
-    JSR stair_controls_update
+    ; Idle and in-progress stair steps need no repeated room-table search.
+    LDA joy_pressed
+    AND #PAD_A
+    BNE stair_controls_call
+    LDA player_state
+    CMP #STATE_STAIR_MOVE
+    BEQ stair_controls_step
+    CMP #STATE_STAIR_IDLE
+    BEQ stair_controls_idle
+    CMP #STATE_APPROACH_STAIRS
+    BEQ stair_controls_restore
+    CMP #STATE_ENTER_STAIRS
+    BEQ stair_controls_restore
+    LDA joy_held
+    AND #(PAD_UP | PAD_DOWN)
+    CMP #PAD_UP
+    BNE stair_controls_restore
+    BEQ stair_controls_call
+stair_controls_step:
+    LDA player_stair_step
+    BNE stair_controls_restore
+    BEQ stair_controls_call
+stair_controls_idle:
+    LDA joy_held
+    AND #$0F
+    BNE stair_controls_call
+    LDA player_phase
+    BMI stair_controls_restore
+stair_controls_call:
+    JSR stair_call_controls
+    BCC stair_controls_restore
+    ; The player bank is mapped again before starting the ascent.
+    JSR start_stair_ascent
+stair_controls_restore:
     PLA
     TAX
     PLA
@@ -103,14 +142,74 @@ stair_controls_tick:
     LDY current_character
     RTS
 
+IF $ > $C000
+    ERROR "Stair entry exceeds the $BFAB-$BFFF player-bank padding"
+ENDIF
+
+; Bank switches execute in the permanently mapped final 8 KiB bank.
+SEEKABS $03FFDA
+BASE $FFCA
+
+stair_call_controls:
+    LDA lower_prg_bank
+    PHA
+    LDA #STAIR_CODE_PRG_BANK
+    JSR set_lower_prg_bank
+    JSR stair_controls_update
+    ; The bank setter and PLA preserve the attachment result in carry.
+    PLA
+    JSR set_lower_prg_bank
+    RTS
+
+; Fetch all three endpoint bytes in one visit to the stair-data bank.
+stair_read_record:
+    LDA #STAIRS_PRG_BANK
+    JSR set_lower_prg_bank
+    JSR stair_read_record_data
+    LDA #STAIR_CODE_PRG_BANK
+    JMP set_lower_prg_bank
+
+IF $ > $FFF0
+    ERROR "Stair bank calls exceed the $FFCA-$FFEF fixed-bank padding"
+ENDIF
+
+SEEKABS $01FFDB
+BASE $BFCB
+
+; Y advances to the next record. The terminator has no coordinate bytes.
+stair_read_record_data:
+    LDA (room_stairs),Y
+    STA stair_endpoint_flags
+    CMP #$FF
+    BEQ stair_read_record_done
+    INY
+    LDA (room_stairs),Y
+    STA stair_endpoint_x
+    INY
+    LDA (room_stairs),Y
+    STA stair_endpoint_x+1
+    INY
+stair_read_record_done:
+    RTS
+
+IF $ > $C000
+    ERROR "Stair record reader exceeds the $BFCB-$BFFF bank-$0F padding"
+ENDIF
+
+SEEKABS $033690
+BASE $B680
+
+; C=1 requests ascent after the player bank has been restored.
 stair_controls_update:
     LDA game_state
     CMP #$04
     BEQ stair_controls_check_cinematic
+    CLC
     RTS
 stair_controls_check_cinematic:
     LDA cinematic_controller
     BEQ stair_controls_check_substate
+    CLC
     RTS
 stair_controls_check_substate:
     LDA gameplay_substate
@@ -120,6 +219,7 @@ stair_controls_check_substate:
     BEQ stair_controls_gameplay
     CMP #$0A
     BEQ stair_controls_gameplay
+    CLC
     RTS
 
 stair_controls_gameplay:
@@ -129,9 +229,9 @@ stair_controls_gameplay:
     CMP #STATE_ENTER_STAIRS
     BEQ stair_controls_on_stairs
     CMP #STATE_STAIR_IDLE
-    BEQ stair_controls_on_stairs
+    BEQ stair_controls_validate
     CMP #STATE_STAIR_MOVE
-    BEQ stair_controls_on_stairs
+    BEQ stair_controls_validate
 
     ; Keep jump and attack button presses ahead of staircase attachment.
     LDA joy_pressed
@@ -153,24 +253,14 @@ stair_controls_gameplay:
 
 stair_controls_airborne:
     ; Allow a descending catch. A jump leaving the stairs keeps its ascent.
+    ; Phase zero includes the jump's stationary preparation frames.
+    LDA player_phase
+    BEQ stair_controls_return
     LDA player_speed_y
     BMI stair_controls_return
 
 stair_controls_find:
-    LDA lower_prg_bank
-    PHA
-    LDA #STAIRS_PRG_BANK
-    JSR set_lower_prg_bank
     JSR stair_find_attachment
-    ; Restore the caller's bank while retaining the search carry in X.
-    PHP
-    PLA
-    TAX
-    PLA
-    JSR set_lower_prg_bank
-    TXA
-    PHA
-    PLP
     BCC stair_controls_return
     JMP stair_attach
 
@@ -183,14 +273,72 @@ stair_controls_on_stairs:
     STA player_state
 
 stair_controls_return:
+    CLC
     RTS
 
-IF $ > $C900
-    ERROR "Stair input hook exceeds the $C810-$C8FF padding"
-ENDIF
+stair_controls_validate:
+    LDA joy_pressed
+    AND #PAD_A
+    BNE stair_controls_on_stairs
+    JSR stair_find_attachment
+    BCC stair_controls_fall
+    LDA stair_best_distance
+    ORA stair_best_distance+1
+    BNE stair_controls_valid
+    ; An endpoint permits movement back into the flight, not past its end.
+    LDA player_state
+    CMP #STATE_STAIR_MOVE
+    BEQ stair_controls_moving_direction
+    LDA joy_held
+    LSR A
+    BCS stair_controls_right
+    LSR A
+    BCS stair_controls_left
+    LSR A
+    BCS stair_controls_down
+    LSR A
+    BCC stair_controls_valid
+    LDA #$80
+    BNE stair_controls_endpoint_direction
+stair_controls_right:
+    LDA player_stair_direction
+    EOR #$01
+    BEQ stair_controls_down
+    BNE stair_controls_up
+stair_controls_left:
+    LDA player_stair_direction
+    BEQ stair_controls_down
+stair_controls_up:
+    LDA #$80
+    BNE stair_controls_endpoint_direction
+stair_controls_down:
+    LDA #$00
+    BEQ stair_controls_endpoint_direction
+stair_controls_moving_direction:
+    LDA player_speed_y
+stair_controls_endpoint_direction:
+    EOR stair_best_flags
+    BPL stair_controls_fall
+stair_controls_valid:
+    LDA player_phase
+    ORA #STAIR_POSITION_CHECKED
+    STA player_phase
+    JMP stair_controls_return
 
-SEEKABS $03DC28
-BASE $DC18
+stair_controls_fall:
+    LDA #STATE_FALL
+    STA player_state
+    STA $05D8 ; Original falling-state animation timer.
+    LDA #$01
+    STA player_phase
+    LDA #$00
+    STA player_speed_x
+    STA player_subspeed_x
+    STA player_speed_y
+    STA player_subspeed_y
+    STA player_fraction_x
+    STA player_fraction_y
+    JMP stair_controls_return
 
 ; C=1 means a staircase intersects the player's feet.
 ; Search slopes independently at staircase crossings.
@@ -201,26 +349,33 @@ stair_find_attachment:
 stair_find_begin:
     LDA #$00
     STA stair_slope
+    LDA player_state
+    CMP #STATE_STAIR_IDLE
+    BCC stair_find_slope
+    LDA player_stair_direction
+    LSR A
+    ROR A
+    ROR A
+    STA stair_slope
 
 stair_find_slope:
     LDA #$FF
     STA stair_best_distance
     STA stair_best_distance+1
+    LDA #$00
+    STA stair_bounds
     LDY #$00
 
 stair_find_endpoint:
-    LDA (room_stairs),Y
+    JSR stair_read_record
+    LDA stair_endpoint_flags
     CMP #$FF
     BNE stair_find_record
     JMP stair_find_evaluate
 stair_find_record:
-    STA stair_endpoint_flags
     AND #$40
     CMP stair_slope
     BEQ stair_find_decode
-    INY
-    INY
-    INY
     JMP stair_find_endpoint
 
 stair_find_decode:
@@ -262,16 +417,56 @@ stair_project_compare:
     SBC stair_player_y+1
     BEQ stair_correction_positive
     CMP #$FF
-    BNE stair_find_next
+    BEQ stair_correction_negative
+    JMP stair_find_next
+stair_correction_negative:
     LDA stair_correction
     CMP #($100 - ATTACH_TOLERANCE)
-    BCC stair_find_next
-    BCS stair_measure_distance
+    BCS stair_find_bound
+    ; Falling can cross the whole contact band between two frames.
+    LDA player_state
+    CMP #STATE_JUMP
+    BEQ stair_check_crossing
+    CMP #STATE_FALL
+    BEQ stair_check_crossing
+    JMP stair_find_next
+stair_check_crossing:
+    JSR stair_relative_fall_speed
+    LDA stair_distance+1
+    BMI stair_find_next
+    BEQ stair_find_next
+    LDA #$00
+    SEC
+    SBC stair_correction
+    CMP stair_distance+1
+    BCC stair_find_bound
+    BEQ stair_find_bound
+    JMP stair_find_next
 
 stair_correction_positive:
     LDA stair_correction
     CMP #(ATTACH_TOLERANCE + 1)
     BCS stair_find_next
+
+stair_find_bound:
+    LDA stair_delta_x
+    ORA stair_delta_x+1
+    BEQ stair_find_bound_inside
+    LDA stair_endpoint_flags
+    ASL A
+    EOR stair_endpoint_flags
+    EOR stair_delta_x+1
+    BMI stair_measure_distance
+stair_find_bound_inside:
+    LDA stair_endpoint_flags
+    BMI stair_find_upper_bound
+    LDA #$01
+    BNE stair_find_save_bound
+stair_find_upper_bound:
+    LDA #$02
+stair_find_save_bound:
+    ORA stair_bounds
+    STA stair_bounds
 
 stair_measure_distance:
     LDA stair_delta_x
@@ -288,7 +483,7 @@ stair_measure_distance:
     STA stair_distance+1
 
 stair_compare_distance:
-    LDA stair_distance+1
+    ; Both paths leave the distance high byte in A.
     CMP stair_best_distance+1
     BCC stair_remember_endpoint
     BNE stair_find_next
@@ -305,8 +500,16 @@ stair_remember_endpoint:
     STA stair_best_correction
     LDA stair_endpoint_flags
     STA stair_best_flags
-    LDA stair_delta_x+1
-    STA stair_best_side
+    LDA stair_endpoint_flags
+    ASL A
+    EOR stair_endpoint_flags
+    EOR stair_delta_x+1
+    AND #$80
+    STA stair_distance
+    LDA stair_bounds
+    AND #$03
+    ORA stair_distance
+    STA stair_bounds
 
 stair_find_next:
     JMP stair_find_endpoint
@@ -320,21 +523,31 @@ stair_find_evaluate:
     ; A lower endpoint points into the ascending half-line, an upper one
     ; into the descending half-line. The nearest collinear endpoint bounds
     ; a flight, including gaps between flights on the same diagonal.
-    LDA stair_best_flags
-    ASL A
-    EOR stair_best_flags
-    EOR stair_best_side
+    LDA stair_bounds
     BMI stair_find_other_slope
 
 stair_find_inside:
-    ; Grounded endpoint entry retains the original alignment animation.
+    ; Native room-edge stair transitions can have a single endpoint.
     LDA player_state
-    CMP #STATE_IDLE
-    BEQ stair_find_ground_endpoint
-    CMP #STATE_WALK
-    BNE stair_find_success
+    CMP #STATE_STAIR_IDLE
+    BCS stair_find_success
+    ; Room-edge flights may have only one endpoint. The nearest endpoint's
+    ; inward-facing half-line also bounds those flights and rejects gaps.
+    ; An upward catch needs room for the first eight-pixel stair step.
+    LDA stair_best_flags
+    BPL stair_find_check_grounded
+    LDA stair_best_distance+1
+    BNE stair_find_check_grounded
+    LDA stair_best_distance
+    CMP #$08
+    BCC stair_find_other_slope
+stair_find_check_grounded:
+    ; Grounded endpoint entry retains the original alignment animation.
+    ; Only idle, walk, jump and fall states reach this search.
+    LDA player_state
+    CMP #STATE_JUMP
+    BCS stair_find_success
 
-stair_find_ground_endpoint:
     LDA stair_best_distance+1
     BNE stair_find_success
     LDA stair_best_distance
@@ -346,6 +559,9 @@ stair_find_success:
     RTS
 
 stair_find_other_slope:
+    LDA player_state
+    CMP #STATE_STAIR_IDLE
+    BCS stair_find_failure
     LDA stair_slope
     BNE stair_find_failure
     LDA #$40
@@ -354,6 +570,33 @@ stair_find_other_slope:
 
 stair_find_failure:
     CLC
+    RTS
+
+; Relative downward travel across the diagonal, rounded up to whole pixels.
+; Right-rising stairs use vy + vx, left-rising stairs use vy - vx.
+stair_relative_fall_speed:
+    LDA stair_slope
+    BNE stair_relative_fall_left
+    CLC
+    LDA player_subspeed_y
+    ADC player_subspeed_x
+    STA stair_distance
+    LDA player_speed_y
+    ADC player_speed_x
+    JMP stair_relative_fall_round
+stair_relative_fall_left:
+    SEC
+    LDA player_subspeed_y
+    SBC player_subspeed_x
+    STA stair_distance
+    LDA player_speed_y
+    SBC player_speed_x
+stair_relative_fall_round:
+    STA stair_distance+1
+    LDA stair_distance
+    BEQ stair_relative_fall_done
+    INC stair_distance+1
+stair_relative_fall_done:
     RTS
 
 ; Vertical room pages are 240 pixels tall.
@@ -401,23 +644,22 @@ stair_player_character_offset:
     LDA current_character
     CMP #CHAR_GRANT
     BNE stair_player_ready
-    ; Grant's standing/climbing origin is four pixels above the others.
-    CLC
+    ; Grant's shorter sprite places its origin four pixels below the others.
+    SEC
     LDA stair_player_y
-    ADC #$04
+    SBC #$04
     STA stair_player_y
     LDA stair_player_y+1
-    ADC #$00
+    SBC #$00
     STA stair_player_y+1
 stair_player_ready:
     SEC
     RTS
 
-; Decode one 3-byte record. Y leaves pointing at the following record.
+; Decode the record fetched by stair_read_record. Y is preserved.
 ; Horizontal layout = flags|Y/16, X low, X page.
 ; Vertical layout   = flags|Y page, Y within page, X.
 stair_decode_endpoint:
-    INY
     LDA room_metadata
     BMI stair_decode_vertical
     LDA stair_endpoint_flags
@@ -428,12 +670,6 @@ stair_decode_endpoint:
     STA stair_endpoint_y
     LDA #$00
     STA stair_endpoint_y+1
-    LDA (room_stairs),Y
-    STA stair_endpoint_x
-    INY
-    LDA (room_stairs),Y
-    STA stair_endpoint_x+1
-    INY
     RTS
 
 stair_decode_vertical:
@@ -441,18 +677,16 @@ stair_decode_vertical:
     AND #$0F
     JSR stair_scale_vertical_page
     CLC
-    LDA (room_stairs),Y
+    LDA stair_endpoint_x
     ADC stair_endpoint_y
     STA stair_endpoint_y
     LDA stair_endpoint_y+1
     ADC #$00
     STA stair_endpoint_y+1
-    INY
-    LDA (room_stairs),Y
+    LDA stair_endpoint_x+1
     STA stair_endpoint_x
     LDA #$00
     STA stair_endpoint_x+1
-    INY
     RTS
 
 ; A = page, endpoint Y = page * 240 = page * 256 - page * 16.
@@ -473,7 +707,7 @@ stair_scale_vertical_page:
     STA stair_endpoint_y+1
     RTS
 
-; The player bank has been restored before this routine is called.
+; Prepare the player, then request ascent in the restored player bank.
 stair_attach:
     CLC
     LDA player_y
@@ -515,9 +749,10 @@ stair_attach_y:
     STA player_stair_alignment
     LDA #$01
     STA player_phase
-    JMP start_stair_ascent
+    SEC
+    RTS
 
-IF $ > $E000
-    ERROR "Stair geometry exceeds the $DC18-$DFFF padding"
+IF $ > $C000
+    ERROR "Stair controls exceed the $B680-$BFFF bank-$19 padding"
 ENDIF
 ENDCOMPARE
