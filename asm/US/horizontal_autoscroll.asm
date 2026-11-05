@@ -8,6 +8,7 @@ CLEARPATCH
 ; Uses bank $1E padding, separate from better_stair.asm.
 
 game_state                 = $18
+lower_prg_bank             = $21
 gameplay_substate          = $2A
 cinematic_controller       = $2C
 stage_index                = $32
@@ -17,6 +18,7 @@ scroll_direction           = $65
 room_metadata              = $68
 scroll_delta               = $6E ; Signed horizontal camera displacement this frame.
 boss_active                = $78
+player_collision_shape     = $82 ; Character index, +4 crouched, $08 in bat form.
 player_x                   = $0438
 player_speed_x             = $04F2
 player_subspeed_x          = $0509
@@ -41,6 +43,13 @@ ENDIF
 native_player_scroll_check = $8748
 native_player_move         = $8762
 native_scroll_continue     = $D179
+native_player_wall_check   = $915E ; A = signed X probe, carry set when blocked.
+native_player_death        = $8398 ; Enter the normal death animation immediately.
+set_lower_prg_bank         = $E2E6
+native_tile_collision      = $FCDD ; A = signed X offset, X = signed Y offset.
+PLAYER_PRG_BANK            = $9C ; MMC5 16 KiB pair $1C/$1D.
+
+horizontal_probe_x         = $00 ; Scratch used by the native wall probes.
 
 ; Retain the preceding boss check at $8740. It skips this hook while
 ; $C000-$DFFF can be mapped to DPCM data instead of game code.
@@ -133,7 +142,8 @@ horizontal_scroll_forced:
     BCS horizontal_scroll_store_x
 horizontal_scroll_clamp_left:
     LDA #SCREEN_LEFT
-    BNE horizontal_scroll_store_x
+    STA player_x
+    JMP horizontal_scroll_check_crush
 
 horizontal_scroll_camera_left:
     SEC
@@ -144,10 +154,50 @@ horizontal_scroll_camera_left:
     BCC horizontal_scroll_store_x
 horizontal_scroll_clamp_right:
     LDA #SCREEN_RIGHT
+    STA player_x
+    JMP horizontal_scroll_check_crush
 horizontal_scroll_store_x:
     STA player_x
 horizontal_scroll_done:
     RTS
+
+; Clamping the trailing edge pushes the player through world space. Check
+; the pushed side using the native character-height probes before it can
+; enter a wall. Open ground at the screen edge still permits movement.
+horizontal_scroll_check_crush:
+    LDA lower_prg_bank
+    PHA
+    LDA #PLAYER_PRG_BANK
+    JSR set_lower_prg_bank
+    LDA scroll_delta
+    BMI horizontal_scroll_probe_left
+    LDA #$08
+    BNE horizontal_scroll_probe_wall
+horizontal_scroll_probe_left:
+    LDA #$F8
+horizontal_scroll_probe_wall:
+    LDY player_collision_shape
+    CPY #$08
+    BEQ horizontal_scroll_probe_bat
+    JSR native_player_wall_check
+    BCC horizontal_scroll_restore_bank
+horizontal_scroll_crushed:
+    JSR native_player_death
+horizontal_scroll_restore_bank:
+    PLA
+    JMP set_lower_prg_bank
+
+; Bat form uses the same +/-6-pixel vertical probes as its native movement.
+horizontal_scroll_probe_bat:
+    STA horizontal_probe_x
+    LDX #$FA
+    JSR native_tile_collision
+    BNE horizontal_scroll_crushed
+    LDA horizontal_probe_x
+    LDX #$06
+    JSR native_tile_collision
+    BNE horizontal_scroll_crushed
+    BEQ horizontal_scroll_restore_bank
 
 ; Reproduce the displaced instructions and resume at the original BNE.
 ; JMP preserves the comparison flags used by the native direction history.
