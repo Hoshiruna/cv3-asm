@@ -204,8 +204,9 @@ IF $ > $FFF0
     ERROR "Stair bank calls exceed the $FFCA-$FFEF fixed-bank padding"
 ENDIF
 
-SEEKABS $01FFDB
-BASE $BFCB
+; $BFCB terminates the stair table for room $0E/$02/$01.
+SEEKABS $01FFDC
+BASE $BFCC
 
 ; Y advances to the next record. The terminator has no coordinate bytes.
 stair_read_record_data:
@@ -224,7 +225,7 @@ stair_read_record_done:
     RTS
 
 IF $ > $C000
-    ERROR "Stair record reader exceeds the $BFCB-$BFFF bank-$0F padding"
+    ERROR "Stair record reader exceeds the $BFCC-$BFFF bank-$0F padding"
 ENDIF
 
 SEEKABS $033690
@@ -419,6 +420,7 @@ stair_find_record:
 
 stair_find_decode:
     JSR stair_decode_endpoint
+    JSR stair_normalize_upper_endpoint
     SEC
     LDA stair_player_x
     SBC stair_endpoint_x
@@ -472,14 +474,15 @@ stair_correction_negative:
 stair_check_crossing:
     JSR stair_relative_fall_speed
     LDA stair_distance+1
-    BMI stair_find_next
-    BEQ stair_find_next
+    BMI stair_crossing_rejected
+    BEQ stair_crossing_rejected
     LDA #$00
     SEC
     SBC stair_correction
     CMP stair_distance+1
     BCC stair_find_bound
     BEQ stair_find_bound
+stair_crossing_rejected:
     JMP stair_find_next
 
 stair_correction_positive:
@@ -528,7 +531,17 @@ stair_compare_distance:
     BNE stair_find_next
     LDA stair_distance
     CMP stair_best_distance
-    BCS stair_find_next
+    BCC stair_remember_endpoint
+    BNE stair_find_next
+    ; At a shared landing, prefer the flight enclosing the player when
+    ; its endpoint is as close as the adjacent flight's outside endpoint.
+    LDA stair_bounds
+    BPL stair_find_next
+    LDA stair_endpoint_flags
+    ASL A
+    EOR stair_endpoint_flags
+    EOR stair_delta_x+1
+    BMI stair_find_next
 
 stair_remember_endpoint:
     LDA stair_distance
@@ -726,6 +739,98 @@ stair_decode_vertical:
     STA stair_endpoint_x
     LDA #$00
     STA stair_endpoint_x+1
+    RTS
+
+; Some vertical-room upper triggers sit one metatile into a wide platform.
+; For a consecutive lower/upper pair, project the lower flight to the upper
+; trigger's height. Keep the native table unchanged for walking onto stairs.
+; Delta/projected-position scratch is free until stair_find_decode resumes.
+stair_normalize_upper_endpoint:
+    LDA room_metadata
+    BMI stair_normalize_check_upper
+    RTS
+stair_normalize_check_upper:
+    LDA stair_endpoint_flags
+    BMI stair_normalize_check_record
+    RTS
+stair_normalize_check_record:
+    CPY #$06
+    BCS stair_normalize_pair
+    RTS
+stair_normalize_pair:
+    LDA stair_endpoint_x
+    STA stair_delta_x
+    LDA stair_endpoint_x+1
+    STA stair_delta_x+1
+    LDA stair_endpoint_y
+    STA stair_projected_y
+    LDA stair_endpoint_y+1
+    STA stair_projected_y+1
+    TYA
+    PHA
+    LDA stair_endpoint_flags
+    PHA
+    TYA
+    SEC
+    SBC #$06
+    TAY
+    JSR stair_read_record
+    JSR stair_decode_endpoint
+    LDX stair_endpoint_flags
+    PLA
+    STA stair_endpoint_flags
+    TXA
+    EOR stair_endpoint_flags
+    AND #$C0
+    CMP #$80
+    BNE stair_normalize_restore
+    SEC
+    LDA stair_endpoint_y
+    SBC stair_projected_y
+    STA stair_distance
+    LDA stair_endpoint_y+1
+    SBC stair_projected_y+1
+    BNE stair_normalize_restore
+    LDA stair_distance
+    BEQ stair_normalize_restore
+    LDA stair_endpoint_flags
+    AND #$40
+    BNE stair_normalize_left
+    CLC
+    LDA stair_endpoint_x
+    ADC stair_distance
+    BCS stair_normalize_restore
+    JMP stair_normalize_compare
+stair_normalize_left:
+    SEC
+    LDA stair_endpoint_x
+    SBC stair_distance
+    BCC stair_normalize_restore
+stair_normalize_compare:
+    STA stair_distance
+    SEC
+    SBC stair_delta_x
+    BCS stair_normalize_distance
+    EOR #$FF
+    CLC
+    ADC #$01
+stair_normalize_distance:
+    CMP #$20
+    BNE stair_normalize_restore
+    LDA stair_distance
+    STA stair_delta_x
+stair_normalize_restore:
+    LDA stair_delta_x
+    STA stair_endpoint_x
+    LDA stair_delta_x+1
+    STA stair_endpoint_x+1
+    LDA stair_projected_y
+    STA stair_endpoint_y
+    LDA stair_projected_y+1
+    STA stair_endpoint_y+1
+    PLA
+    TAY
+stair_normalize_done:
     RTS
 
 ; A = page, endpoint Y = page * 240 = page * 256 - page * 16.

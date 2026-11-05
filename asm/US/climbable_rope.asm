@@ -5,7 +5,8 @@
 ;
 ; Hold Up or Down near a rope to grab it from the ground or while descending.
 ; Up/Down climbs one pixel per frame. A jumps off using native character
-; physics. The upper end stops ascent. Down at the lower end lets go.
+; physics. Down+A lets go immediately, with re-grab enabled when Down is
+; released. The upper end stops ascent. Down at the lower end lets go.
 ; Rope graphics belong in the room's background tiles. The coordinate table
 ; below supplies the climbable segments independently of those graphics.
 
@@ -14,6 +15,7 @@ STATE_ROPE             = $4A ; Beyond Grant's native state table, intercepted he
 STATE_DUCK             = $0A
 ROPE_ATTACH_TOLERANCE   = $06
 ROPE_RECORD_SIZE        = 9
+ROPE_DROP_LOCK          = $80 ; High phase bit during a manual airborne release.
 
 rope_stage             = $32
 rope_block             = $33
@@ -71,6 +73,23 @@ rope_controls_gameplay:
     JMP rope_controls_attached
 
 rope_controls_try_grab:
+    ; Native jump/fall handlers use phase zero for ascent and nonzero for
+    ; descent. Its high bit holds the manual-release latch while airborne.
+    LDA player_state
+    CMP #STATE_JUMP
+    BEQ rope_controls_check_drop
+    CMP #STATE_FALL
+    BNE rope_controls_grab_buttons
+rope_controls_check_drop:
+    LDA player_phase
+    BPL rope_controls_grab_buttons
+    LDA joy_held
+    AND #PAD_DOWN
+    BNE rope_controls_unused
+    LDA player_phase
+    AND #($FF ^ ROPE_DROP_LOCK)
+    STA player_phase
+rope_controls_grab_buttons:
     ; A held prevents catching the rope during jump preparation.
     LDA joy_held
     AND #(PAD_A | PAD_UP | PAD_DOWN)
@@ -146,9 +165,20 @@ rope_controls_input:
     LDA joy_pressed
     AND #PAD_A
     BEQ rope_controls_hold
+    LDA joy_held
+    AND #PAD_DOWN
+    BNE rope_controls_drop
     JSR rope_clear_motion
     LDA #STATE_JUMP_START
     STA player_state
+    SEC
+    RTS
+
+rope_controls_drop:
+    JSR rope_release
+    LDA player_phase
+    ORA #ROPE_DROP_LOCK
+    STA player_phase
     SEC
     RTS
 
