@@ -1,8 +1,11 @@
 ; SPDX-License-Identifier: MIT
 ; Assemble from the project root with nstbayless/asm6f (INCNES and SEEKABS).
 
-INCNES "Castlevania III - Dracula's Curse (USA).nes"
-CLEARPATCH
+; Define DEBUG_MENU_APPEND when including after another patch's ROM load.
+IFNDEF DEBUG_MENU_APPEND
+    INCNES "Castlevania III - Dracula's Curse (USA).nes"
+    CLEARPATCH
+ENDIF
 
 ; Castlevania III (USA), MMC5, Ricoh 2A03.
 ; 1 opens the native debug menu when starting a new game, 0 disables this patch.

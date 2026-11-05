@@ -3,7 +3,7 @@
 ; This entry includes better_stair.asm. Assemble this entry once for both.
 ; Castlevania III (USA), MMC5, Ricoh 2A03.
 ;
-; Hold Up near a rope to grab it from the ground or while descending.
+; Hold Up or Down near a rope to grab it from the ground or while descending.
 ; Up/Down climbs one pixel per frame. A jumps off using native character
 ; physics. The upper end stops ascent. Down at the lower end lets go.
 ; Rope graphics belong in the room's background tiles. The coordinate table
@@ -11,6 +11,7 @@
 
 ROPE_CONTROLS_ENABLED   = 1
 STATE_ROPE             = $4A ; Beyond Grant's native state table, intercepted here.
+STATE_DUCK             = $0A
 ROPE_ATTACH_TOLERANCE   = $06
 ROPE_RECORD_SIZE        = 9
 
@@ -74,7 +75,10 @@ rope_controls_try_grab:
     LDA joy_held
     AND #(PAD_A | PAD_UP | PAD_DOWN)
     CMP #PAD_UP
+    BEQ rope_controls_grab_direction
+    CMP #PAD_DOWN
     BNE rope_controls_unused
+rope_controls_grab_direction:
     LDA joy_pressed
     AND #PAD_B
     BNE rope_controls_unused
@@ -82,6 +86,8 @@ rope_controls_try_grab:
     CMP #STATE_IDLE
     BEQ rope_controls_find
     CMP #STATE_WALK
+    BEQ rope_controls_find
+    CMP #STATE_DUCK
     BEQ rope_controls_find
     CMP #STATE_JUMP
     BEQ rope_controls_descending
@@ -374,6 +380,12 @@ rope_pose_indices:
 ; Insert records before $FF. Put ropes in open columns with head clearance.
 ; The room artwork must draw the corresponding rope at these coordinates.
 rope_segments:
+IFDEF ROPE_ROOM_1_02
+    ; Stage 1 block 02, next to the right wall. Keep the player's +/-5
+    ; probes inside the shaft. The visual center is one pixel to the right.
+    DB $00, $01, $00
+    DW $00DA, $0050, $00B0
+ENDIF
     DB $FF
 rope_segments_end:
 
