@@ -4,6 +4,9 @@
 # List
 *.lst
 
+# Photoshop
+*.psd
+
 # Assembler outputs
 *.ips
 *.lst

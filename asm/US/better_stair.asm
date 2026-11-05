@@ -83,7 +83,11 @@ FILLVALUE $05
 DB $05
 ENDCOMPARE
 SKIPREL -3
+IFDEF ROPE_CONTROLS_ENABLED
+JMP stair_controls_tick
+ELSE
 JSR stair_controls_tick
+ENDIF
 
 ; All code regions are padding in the unmodified US ROM.
 ; COMPARE rejects occupied space when applying to another hack.
@@ -96,6 +100,32 @@ SEEKABS $03BFBB
 BASE $BFAB
 
 stair_controls_tick:
+IFDEF ROPE_CONTROLS_ENABLED
+    PHP
+    PHA
+    TXA
+    PHA
+    JSR stair_call_controls
+    BCC stair_rope_dispatch
+    JSR start_stair_ascent
+stair_rope_dispatch:
+    LDA player_state
+    CMP #STATE_ROPE
+    BEQ stair_rope_move
+    PLA
+    TAX
+    PLA
+    PLP
+    LDY current_character
+    JMP $8A94 ; Original character dispatch, after the displaced LDY.
+stair_rope_move:
+    PLA
+    TAX
+    PLA
+    PLP
+    JSR $8712 ; Native Y movement also requests vertical camera scrolling.
+    JMP $8AA5 ; Keep the shared hazards and post-state processing.
+ELSE
     PHP
     PHA
     TXA
@@ -141,6 +171,7 @@ stair_controls_restore:
     ; Reproduce the displaced LDY, including the flags used by BEQ $8AA2.
     LDY current_character
     RTS
+ENDIF
 
 IF $ > $C000
     ERROR "Stair entry exceeds the $BFAB-$BFFF player-bank padding"
@@ -201,6 +232,14 @@ BASE $B680
 
 ; C=1 requests ascent after the player bank has been restored.
 stair_controls_update:
+IFDEF ROPE_CONTROLS_ENABLED
+    JSR rope_controls_update
+    BCC stair_controls_without_rope
+    ; Rope input has been handled. Carry only requests native stair ascent.
+    CLC
+    RTS
+stair_controls_without_rope:
+ENDIF
     LDA game_state
     CMP #$04
     BEQ stair_controls_check_cinematic
