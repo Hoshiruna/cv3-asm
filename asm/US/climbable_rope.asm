@@ -16,8 +16,6 @@ STATE_DUCK             = $0A
 ROPE_ATTACH_TOLERANCE   = $06
 ROPE_RECORD_SIZE        = 9
 ROPE_DROP_LOCK          = $80 ; High phase bit during a manual airborne release.
-ROPE_TREVOR_CHR_0       = $3B
-ROPE_TREVOR_CHR_1       = $3D
 
 rope_stage             = $32
 rope_block             = $33
@@ -47,7 +45,6 @@ COMPARE
 ; The custom state itself owns attachment. Native damage, death and
 ; character changes replace that state and immediately end rope control.
 rope_controls_update:
-    JSR rope_restore_player_chr
     LDA game_state
     CMP #$04
     BNE rope_controls_unavailable
@@ -244,36 +241,8 @@ rope_controls_pose:
 rope_controls_pose_first:
     LDA rope_pose_indices,Y
     STA rope_sprite
-    LDA current_character
-    BNE rope_controls_pose_ready
-    ; Apply these pages with the next OAM DMA at the start of NMI.
-    LDA #ROPE_TREVOR_CHR_0
-    STA $46
-    LDA #ROPE_TREVOR_CHR_1
-    STA $47
-rope_controls_pose_ready:
     SEC
     RTS
-
-; Native damage and character changes also pass through this hook.
-rope_restore_player_chr:
-    LDA $46
-    CMP #ROPE_TREVOR_CHR_0
-    BNE rope_restore_player_chr_done
-    LDA $47
-    CMP #ROPE_TREVOR_CHR_1
-    BNE rope_restore_player_chr_done
-    LDY current_character
-    LDA rope_native_chr_banks,Y
-    STA $46
-    CLC
-    ADC #$01
-    STA $47
-rope_restore_player_chr_done:
-    RTS
-
-rope_native_chr_banks:
-    DB $00, $04, $02, $06
 
 ; Y is a record offset and is preserved. C=1 means the room, X tolerance
 ; and inclusive Y bounds match the normalized player origin.

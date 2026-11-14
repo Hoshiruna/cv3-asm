@@ -672,14 +672,20 @@ stair_get_player_position:
     JMP stair_player_character_offset
 
 stair_player_vertical:
+    ; Screen Y can be above $33 while the camera is inside the room.
+    ; Keep the borrow until the camera offset and page have been added.
     LDA player_y
     SEC
     SBC #$33
-    BCC stair_find_failure
-    CLC
-    ADC scroll_offset
     STA stair_player_y
     LDA #$00
+    SBC #$00
+    STA stair_player_y+1
+    CLC
+    LDA stair_player_y
+    ADC scroll_offset
+    STA stair_player_y
+    LDA stair_player_y+1
     ADC #$00
     STA stair_player_y+1
     LDA scroll_screen
@@ -691,6 +697,9 @@ stair_player_vertical:
     LDA stair_player_y+1
     ADC stair_endpoint_y+1
     STA stair_player_y+1
+    BPL stair_player_character_offset
+    CLC
+    RTS
 
 stair_player_character_offset:
     LDA current_character
