@@ -323,6 +323,21 @@ stair_controls_validate:
     BNE stair_controls_valid
     ; An endpoint permits movement back into the flight, not past its end.
     LDA joy_held
+    AND #$0F
+    BEQ stair_controls_valid
+    JSR stair_input_direction
+    EOR stair_best_flags
+    BPL stair_controls_fall
+stair_controls_valid:
+    LDA player_phase
+    ORA #STAIR_POSITION_CHECKED
+    STA player_phase
+    JMP stair_controls_return
+
+; Return $80 for ascent and $00 for descent, using native input priority.
+; With no direction held, retain the last step's vertical direction.
+stair_input_direction:
+    LDA joy_held
     LSR A
     BCS stair_controls_right
     LSR A
@@ -330,9 +345,9 @@ stair_controls_validate:
     LSR A
     BCS stair_controls_down
     LSR A
-    BCC stair_controls_valid
-    LDA #$80
-    BNE stair_controls_endpoint_direction
+    BCS stair_controls_up
+    LDA player_speed_y
+    RTS
 stair_controls_right:
     LDA player_stair_direction
     EOR #$01
@@ -343,18 +358,10 @@ stair_controls_left:
     BEQ stair_controls_down
 stair_controls_up:
     LDA #$80
-    BNE stair_controls_endpoint_direction
+    RTS
 stair_controls_down:
     LDA #$00
-    BEQ stair_controls_endpoint_direction
-stair_controls_endpoint_direction:
-    EOR stair_best_flags
-    BPL stair_controls_fall
-stair_controls_valid:
-    LDA player_phase
-    ORA #STAIR_POSITION_CHECKED
-    STA player_phase
-    JMP stair_controls_return
+    RTS
 
 stair_controls_fall:
     LDA #STATE_FALL
@@ -412,41 +419,7 @@ stair_find_record:
 stair_find_decode:
     JSR stair_decode_endpoint
     JSR stair_normalize_upper_endpoint
-    SEC
-    LDA stair_player_x
-    SBC stair_endpoint_x
-    STA stair_delta_x
-    LDA stair_player_x+1
-    SBC stair_endpoint_x+1
-    STA stair_delta_x+1
-
-    ; At the player's X, an ascending-right line has Y = endpoint Y - dx.
-    LDA stair_slope
-    BNE stair_project_left
-    SEC
-    LDA stair_endpoint_y
-    SBC stair_delta_x
-    STA stair_projected_y
-    LDA stair_endpoint_y+1
-    SBC stair_delta_x+1
-    JMP stair_project_compare
-
-stair_project_left:
-    CLC
-    LDA stair_endpoint_y
-    ADC stair_delta_x
-    STA stair_projected_y
-    LDA stair_endpoint_y+1
-    ADC stair_delta_x+1
-
-stair_project_compare:
-    STA stair_projected_y+1
-    SEC
-    LDA stair_projected_y
-    SBC stair_player_y
-    STA stair_correction
-    LDA stair_projected_y+1
-    SBC stair_player_y+1
+    JSR stair_project_endpoint
     BEQ stair_correction_positive
     CMP #$FF
     BEQ stair_correction_negative
@@ -479,7 +452,8 @@ stair_crossing_rejected:
 stair_correction_positive:
     LDA stair_correction
     CMP #(ATTACH_TOLERANCE + 1)
-    BCS stair_find_next
+    BCC stair_find_bound
+    JMP stair_find_next
 
 stair_find_bound:
     LDA stair_delta_x
@@ -524,6 +498,16 @@ stair_compare_distance:
     CMP stair_best_distance
     BCC stair_remember_endpoint
     BNE stair_find_next
+    ; Joined flights share an upper/lower endpoint. Choose the flight
+    ; entered by the requested direction before rejecting an outward step.
+    LDA stair_distance
+    ORA stair_distance+1
+    BNE stair_compare_inside
+    JSR stair_input_direction
+    EOR stair_endpoint_flags
+    BMI stair_remember_endpoint
+    BPL stair_find_next
+stair_compare_inside:
     ; At a shared landing, prefer the flight enclosing the player when
     ; its endpoint is as close as the adjacent flight's outside endpoint.
     LDA stair_bounds
@@ -613,6 +597,42 @@ stair_find_other_slope:
 
 stair_find_failure:
     CLC
+    RTS
+
+; Project the endpoint's diagonal onto player X. A is the signed correction
+; high byte, stair_correction is its low byte, and Y keeps the table cursor.
+stair_project_endpoint:
+    SEC
+    LDA stair_player_x
+    SBC stair_endpoint_x
+    STA stair_delta_x
+    LDA stair_player_x+1
+    SBC stair_endpoint_x+1
+    STA stair_delta_x+1
+    LDA stair_slope
+    BNE stair_project_left
+    SEC
+    LDA stair_endpoint_y
+    SBC stair_delta_x
+    STA stair_projected_y
+    LDA stair_endpoint_y+1
+    SBC stair_delta_x+1
+    JMP stair_project_compare
+stair_project_left:
+    CLC
+    LDA stair_endpoint_y
+    ADC stair_delta_x
+    STA stair_projected_y
+    LDA stair_endpoint_y+1
+    ADC stair_delta_x+1
+stair_project_compare:
+    STA stair_projected_y+1
+    SEC
+    LDA stair_projected_y
+    SBC stair_player_y
+    STA stair_correction
+    LDA stair_projected_y+1
+    SBC stair_player_y+1
     RTS
 
 ; Relative downward travel across the diagonal, rounded up to whole pixels.
@@ -746,15 +766,25 @@ stair_decode_vertical:
 ; trigger's height. Keep the native table unchanged for walking onto stairs.
 ; Delta/projected-position scratch is free until stair_find_decode resumes.
 stair_normalize_upper_endpoint:
-    ; Native downward entry keeps phase bit 0 clear and follows the raw
-    ; upper trigger. Keep that line when checking an attached character.
-    ; The idle-position cache uses bit 7, leaving the entry direction intact.
+    ; Keep a raw upper trigger when the attached player follows its line.
+    ; Otherwise normalize it so adjacent flights retain their shared end.
     LDA player_state
     CMP #STATE_STAIR_IDLE
     BCC stair_normalize_room
-    LDA player_phase
-    AND #$01
+    LDA stair_endpoint_flags
+    BPL stair_normalize_room
+    JSR stair_project_endpoint
+    BEQ stair_normalize_raw_positive
+    CMP #$FF
     BNE stair_normalize_room
+    LDA stair_correction
+    CMP #($100 - ATTACH_TOLERANCE)
+    BCC stair_normalize_room
+    RTS
+stair_normalize_raw_positive:
+    LDA stair_correction
+    CMP #(ATTACH_TOLERANCE + 1)
+    BCS stair_normalize_room
     RTS
 stair_normalize_room:
     LDA room_metadata
