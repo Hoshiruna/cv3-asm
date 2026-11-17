@@ -130,13 +130,13 @@ ELSE
     PHA
     TXA
     PHA
-    ; Idle and in-progress stair steps need no repeated room-table search.
+    ; Let the native handler finish each step and its landing checks.
     LDA joy_pressed
     AND #PAD_A
     BNE stair_controls_call
     LDA player_state
     CMP #STATE_STAIR_MOVE
-    BEQ stair_controls_step
+    BEQ stair_controls_restore
     CMP #STATE_STAIR_IDLE
     BEQ stair_controls_idle
     CMP #STATE_APPROACH_STAIRS
@@ -146,10 +146,6 @@ ELSE
     LDA joy_held
     AND #(PAD_UP | PAD_DOWN)
     CMP #PAD_UP
-    BNE stair_controls_restore
-    BEQ stair_controls_call
-stair_controls_step:
-    LDA player_stair_step
     BNE stair_controls_restore
     BEQ stair_controls_call
 stair_controls_idle:
@@ -271,7 +267,7 @@ stair_controls_gameplay:
     CMP #STATE_STAIR_IDLE
     BEQ stair_controls_validate
     CMP #STATE_STAIR_MOVE
-    BEQ stair_controls_validate
+    BEQ stair_controls_on_stairs
 
     ; Keep jump and attack button presses ahead of staircase attachment.
     LDA joy_pressed
@@ -326,9 +322,6 @@ stair_controls_validate:
     ORA stair_best_distance+1
     BNE stair_controls_valid
     ; An endpoint permits movement back into the flight, not past its end.
-    LDA player_state
-    CMP #STATE_STAIR_MOVE
-    BEQ stair_controls_moving_direction
     LDA joy_held
     LSR A
     BCS stair_controls_right
@@ -354,8 +347,6 @@ stair_controls_up:
 stair_controls_down:
     LDA #$00
     BEQ stair_controls_endpoint_direction
-stair_controls_moving_direction:
-    LDA player_speed_y
 stair_controls_endpoint_direction:
     EOR stair_best_flags
     BPL stair_controls_fall
@@ -755,6 +746,17 @@ stair_decode_vertical:
 ; trigger's height. Keep the native table unchanged for walking onto stairs.
 ; Delta/projected-position scratch is free until stair_find_decode resumes.
 stair_normalize_upper_endpoint:
+    ; Native downward entry keeps phase bit 0 clear and follows the raw
+    ; upper trigger. Keep that line when checking an attached character.
+    ; The idle-position cache uses bit 7, leaving the entry direction intact.
+    LDA player_state
+    CMP #STATE_STAIR_IDLE
+    BCC stair_normalize_room
+    LDA player_phase
+    AND #$01
+    BNE stair_normalize_room
+    RTS
+stair_normalize_room:
     LDA room_metadata
     BMI stair_normalize_check_upper
     RTS
