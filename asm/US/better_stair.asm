@@ -50,6 +50,7 @@ STAIRS_PRG_BANK        = $8E ; MMC5 16 KiB pair $0E/$0F.
 STAIR_CODE_PRG_BANK    = $98 ; MMC5 16 KiB pair $18/$19.
 ATTACH_TOLERANCE       = $01
 STAIR_POSITION_CHECKED = $80 ; Cached only while idle on a staircase.
+SCRIPTED_STAIR_TABLE   = $BD2E ; Room $08/$03/$00, first flight exits upward.
 
 set_lower_prg_bank     = $E2E6
 start_stair_ascent     = $9B8E ; Sets animation, facing, X/Y speed and state $14.
@@ -255,10 +256,18 @@ stair_controls_check_substate:
     BEQ stair_controls_gameplay
     CMP #$0A
     BEQ stair_controls_gameplay
+    CMP #$16
+    BEQ stair_controls_gameplay
     CLC
     RTS
 
 stair_controls_gameplay:
+    JSR stair_is_scripted_flight
+    BCC stair_controls_free_flight
+    ; Keep native entry, climbing and the forced transition on this flight.
+    CLC
+    RTS
+stair_controls_free_flight:
     LDA player_state
     CMP #STATE_APPROACH_STAIRS
     BEQ stair_controls_on_stairs
@@ -333,6 +342,31 @@ stair_controls_valid:
     ORA #STAIR_POSITION_CHECKED
     STA player_phase
     JMP stair_controls_return
+
+; Only the first flight in this table occupies world X $0340-$0390.
+; Leave its controls to the native handlers, including jump-button handling.
+stair_is_scripted_flight:
+    LDA room_stairs
+    CMP #<SCRIPTED_STAIR_TABLE
+    BNE stair_scripted_not_found
+    LDA room_stairs+1
+    CMP #>SCRIPTED_STAIR_TABLE
+    BNE stair_scripted_not_found
+    JSR stair_get_player_position
+    BCC stair_scripted_not_found
+    LDA stair_player_x+1
+    CMP #$03
+    BNE stair_scripted_not_found
+    LDA stair_player_x
+    CMP #$40
+    BCC stair_scripted_not_found
+    CMP #$91
+    BCS stair_scripted_not_found
+    SEC
+    RTS
+stair_scripted_not_found:
+    CLC
+    RTS
 
 ; Return $80 for ascent and $00 for descent, using native input priority.
 ; With no direction held, retain the last step's vertical direction.
